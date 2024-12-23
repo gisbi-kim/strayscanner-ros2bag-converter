@@ -27,6 +27,9 @@
 - You can check the results 
     - using rviz2, the example is: 
         - ![example1](docs/rviz2_example.png)
+        <video src="videos/rviz2_example.webm" controls width="800">
+            Your browser does not support the video tag.
+        </video>
     - and topic echo 
         - ![example2](docs/topic_echo.png)
 
