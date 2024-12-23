@@ -30,8 +30,8 @@
 
         <video src="videos/rviz2_example.webm" controls width="800">
             Your browser does not support the video tag.
-
         </video>
+
     - and topic echo 
         - ![example2](docs/topic_echo.png)
 
