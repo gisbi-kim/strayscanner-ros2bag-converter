@@ -27,7 +27,7 @@
 - You can check the results 
     - using rviz2, the example is: 
         - ![example1](docs/rviz2_example.png)
-        - and see `docs/rviz2_example.mp4`
+        - and see [docs/rviz2_example.mp4 (youtube)](https://youtu.be/D4_ow6G8DyM?si=4pifTyiG2bhGU8RI)
     - using topic echo 
         - ![example2](docs/topic_echo.png)
 
