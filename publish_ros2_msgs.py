@@ -230,6 +230,7 @@ class StrayScannerDataPublisher(Node):
         self.odometry_pub = self.create_publisher(Odometry, "/odometry", 100)
         self.rgb_pub = self.create_publisher(Image, "/camera/rgb", 100)
         self.depth_pub = self.create_publisher(Image, "/camera/depth", 100)
+        self.rgb_and_depth_pub = self.create_publisher(Image, "/camera/rgb_and_depth", 100)
         self.pointcloud_pub_body = self.create_publisher(
             PointCloud2, "/pointcloud_body", 100
         )
@@ -462,7 +463,14 @@ class StrayScannerDataPublisher(Node):
                 image_info = entry["data"]
                 bgr_img = cv2.imread(image_info["path"])
                 if bgr_img is not None:
-                    img_msg = self.bridge.cv2_to_imgmsg(bgr_img, encoding="bgr8")
+                    # 가로세로 절반으로 다운사이즈
+                    height, width = bgr_img.shape[:2]
+                    resized_img = cv2.resize(bgr_img, (width // 2, height // 2))
+
+                    # 오른쪽으로 90도 회전
+                    rotated_img = cv2.rotate(resized_img, cv2.ROTATE_90_CLOCKWISE)
+
+                    img_msg = self.bridge.cv2_to_imgmsg(rotated_img, encoding="bgr8")
                     img_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                     img_msg.header.frame_id = "camera_rgb_frame"
                     self.rgb_pub.publish(img_msg)
@@ -482,16 +490,43 @@ class StrayScannerDataPublisher(Node):
                     and depth_img.dtype == np.uint16
                     and confidence_img is not None
                 ):
-                    # Create mask to filter out noisy points (== 0)
-                    mask = (confidence_img == 1) | (confidence_img == 2)
-
                     # Publish depth image
-                    depth_msg = self.bridge.cv2_to_imgmsg(depth_img, encoding="mono16")
+                    rotated_depth_img = cv2.rotate(depth_img, cv2.ROTATE_90_CLOCKWISE)
+                    depth_msg = self.bridge.cv2_to_imgmsg(rotated_depth_img, encoding="mono16")
                     depth_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                     depth_msg.header.frame_id = "camera_depth_frame"
                     self.depth_pub.publish(depth_msg)
 
+                    # 
+                    # publish rgb and depth combined image 
+                    # 
+                    # Resize RGB to match Depth's dimensions
+                    resized_rgb_img = cv2.resize(rotated_img, (rotated_depth_img.shape[1], rotated_depth_img.shape[0]))
+
+                    # Normalize Depth image to 8-bit for concatenation
+                    normalized_depth_img = cv2.normalize(rotated_depth_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+                    # Convert grayscale depth image to 3 channels for concatenation with RGB
+                    depth_img_3channel = cv2.cvtColor(normalized_depth_img, cv2.COLOR_GRAY2BGR)
+
+                    # Concatenate RGB and Depth images horizontally
+                    combined_img = cv2.hconcat([resized_rgb_img, depth_img_3channel])
+
+                    # Convert combined image to ROS Image message
+                    rgb_and_depth_msg = self.bridge.cv2_to_imgmsg(combined_img, encoding="bgr8")
+                    rgb_and_depth_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
+                    rgb_and_depth_msg.header.frame_id = "camera_combined_frame"
+
+                    # Publish the combined image
+                    self.rgb_and_depth_pub.publish(rgb_and_depth_msg)
+
+                    # 
+                    # publish colored point cloud 
+                    # 
                     # Adjust RGB image and camera matrix
+
+                    mask = (confidence_img == 1) | (confidence_img == 2)
+
                     resized_rgb, adjusted_camera_matrix = adjust_rgb_and_camera_matrix(
                         rgb_img, depth_img, self.rgb_intrinsic_matrix
                     )
