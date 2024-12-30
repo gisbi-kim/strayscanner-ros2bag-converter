@@ -143,9 +143,7 @@ def unproject_depth(depth_image, rgb_image, camera_matrix, mask=None):
     colors = rgb_flat[valid]  # Get colors for valid depth points
 
     # Combine points and colors
-    point_cloud = np.concatenate((points_3d, colors), axis=-1)  # Shape: (N, 6)
-
-    return point_cloud
+    return np.concatenate((points_3d, colors), axis=-1)  # Shape: (N, 6)
 
 
 def read_csv(file_path):
@@ -154,6 +152,40 @@ def read_csv(file_path):
         data = [row for row in reader]
     return data
 
+def rotate_to_earth(points_with_rgb):
+    """
+    Preprocess the point cloud by downsampling and transforming coordinates.
+
+    Args:
+        points_with_rgb (np.ndarray): Input point cloud with RGB, shape (N, 6).
+        voxel_size (float): The size of the voxel grid for downsampling in meters.
+
+    Returns:
+        np.ndarray: Preprocessed point cloud with RGB, shape (M, 6).
+    """
+    if points_with_rgb.size == 0:
+        return points_with_rgb
+
+    # Separate XYZ and RGB
+    points_xyz = points_with_rgb[:, :3]
+    points_rgb = points_with_rgb[:, 3:]
+
+    # Coordinate Transformation
+    # Define rotation matrix to convert from camera to base coordinates
+    # Camera (x_right, y_down, z_forward) -> Base (x_forward, y_left, z_up)
+    R = np.array([
+        [0,  0, -1],
+        [1, 0, 0],
+        [0, -1, 0]
+    ])
+
+    # Apply rotation
+    transformed_xyz = points_xyz @ R
+
+    # Combine transformed XYZ with RGB
+    preprocessed_points = np.hstack((transformed_xyz, points_rgb))
+
+    return preprocessed_points
 
 def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
     """
@@ -245,6 +277,7 @@ class StrayScannerDataPublisher(Node):
             raise FileNotFoundError(f"Camera matrix file not found: {camera_matrix_csv}")
 
         # pub option
+        self.do_rotate_points = True
         self.skip_frame_k = 1
 
         # Combine and sort all data
@@ -311,6 +344,7 @@ class StrayScannerDataPublisher(Node):
                 if os.path.exists(image_path):
                     image_data.append({"timestamp": timestamp, "path": image_path})
         return image_data
+
 
     def publish_data(self):
         if self.current_index >= len(self.sorted_data):
@@ -382,7 +416,7 @@ class StrayScannerDataPublisher(Node):
                 confidence_img = cv2.imread(image_info["confidence_path"], cv2.IMREAD_UNCHANGED) # 0, 1, 2
 
                 if depth_img is not None and depth_img.dtype == np.uint16 and confidence_img is not None:
-                    # Create mask where confidence == 2
+                    # Create mask to filter out noisy points (== 0)
                     mask = (confidence_img == 1) | (confidence_img == 2)
 
                     # Publish depth image
@@ -395,13 +429,16 @@ class StrayScannerDataPublisher(Node):
                     resized_rgb, adjusted_camera_matrix = adjust_rgb_and_camera_matrix(
                         rgb_img, depth_img, self.rgb_intrinsic_matrix
                     )
-                    points = unproject_depth(
+                    points_with_rgb = unproject_depth(
                         depth_img, resized_rgb, adjusted_camera_matrix, mask=mask
                     )
 
-                    if points.size > 0:
+                    if self.do_rotate_points:
+                        points_with_rgb = rotate_to_earth(points_with_rgb)
+
+                    if points_with_rgb.size > 0:
                         # Convert points to PointCloud2 message
-                        pointcloud_msg = create_pointcloud2(points)
+                        pointcloud_msg = create_pointcloud2(points_with_rgb)
                         pointcloud_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
                         self.pointcloud_pub.publish(pointcloud_msg)
                     else:
