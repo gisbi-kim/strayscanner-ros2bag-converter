@@ -5,15 +5,16 @@ import cv2
 import rclpy
 from rclpy.node import Node
 import csv
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation as R
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Imu, Image, PointCloud2, PointField
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import Quaternion, TransformStamped
 import numpy as np
 import time
 from std_msgs.msg import Header
 from tqdm import tqdm
+import tf2_ros
 
 
 def adjust_rgb_and_camera_matrix(rgb_image, depth_image, camera_matrix):
@@ -52,7 +53,7 @@ def adjust_rgb_and_camera_matrix(rgb_image, depth_image, camera_matrix):
     return resized_rgb, adjusted_camera_matrix
 
 
-def create_pointcloud2(points_with_rgb):
+def create_pointcloud2(points_with_rgb, frame_id):
     """
     Create a PointCloud2 message from 3D points with RGB.
 
@@ -65,7 +66,7 @@ def create_pointcloud2(points_with_rgb):
     pointcloud_msg = PointCloud2()
 
     # Header
-    pointcloud_msg.header.frame_id = "camera_depth_frame"
+    pointcloud_msg.header.frame_id = frame_id
 
     # Define fields for PointCloud2
     fields = [
@@ -236,6 +237,8 @@ class StrayScannerDataPublisher(Node):
             PointCloud2, "/pointcloud_world", 100
         )
 
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+
         # Load CSV data
         imu_data = read_csv(f"{data_dir}/imu.csv")[1:]  # Skip header
         odometry_data = read_csv(f"{data_dir}/odometry.csv")[1:]  # Skip header
@@ -382,40 +385,77 @@ class StrayScannerDataPublisher(Node):
                 odom_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                 odom_msg.header.frame_id = "odom_frame"
                 odom_msg.child_frame_id = "base_link"
-                odom_msg.pose.pose.position.x = float(odom_row[2])
-                odom_msg.pose.pose.position.y = float(odom_row[3])
-                odom_msg.pose.pose.position.z = float(odom_row[4])
+
+                # Extract translation
+                x = float(odom_row[2])
+                y = float(odom_row[3])
+                z = float(odom_row[4])
+
+                # Extract quaternion
+                qx = float(odom_row[5])
+                qy = float(odom_row[6])
+                qz = float(odom_row[7])
+                qw = float(odom_row[8])
+
+                # Create a rotation matrix from the quaternion
+                rotation = R.from_quat([qx, qy, qz, qw]).as_matrix()
+
+                # Construct the SE(3) transformation matrix
+                pose_body = np.eye(4)
+                pose_body[:3, :3] = rotation  # Top-left 3x3 block is the rotation matrix
+                pose_body[:3, 3] = [x, y, z]  # Top-right 3x1 block is the translation vector
+
+                T_cam_to_FLU = np.array(
+                    [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
+                )
+                pose_world = T_cam_to_FLU @ pose_body
+
+                # Extract position
+                position_world = pose_world[:3, 3]
+
+                # Extract rotation matrix
+                rotation_matrix_world = pose_world[:3, :3]
+
+                # Convert rotation matrix to quaternion
+                quaternion_world = R.from_matrix(rotation_matrix_world).as_quat()  # [qx, qy, qz, qw]
+
+                odom_msg.pose.pose.position.x = position_world[0]
+                odom_msg.pose.pose.position.y = position_world[1]
+                odom_msg.pose.pose.position.z = position_world[2]
                 odom_msg.pose.pose.orientation = Quaternion(
-                    x=float(odom_row[5]),
-                    y=float(odom_row[6]),
-                    z=float(odom_row[7]),
-                    w=float(odom_row[8]),
+                    x=quaternion_world[0],
+                    y=quaternion_world[1],
+                    z=quaternion_world[2],
+                    w=quaternion_world[3],
                 )
-
-                # Extract position and orientation from odom_row
-                position = np.array(
-                    [float(odom_row[2]), float(odom_row[3]), float(odom_row[4])]
-                )
-                orientation = [
-                    float(odom_row[5]),
-                    float(odom_row[6]),
-                    float(odom_row[7]),
-                    float(odom_row[8]),
-                ]
-
-                # Convert quaternion to rotation matrix using scipy
-                rotation_matrix = Rotation.from_quat(orientation).as_matrix()
 
                 # Construct SE(3) transformation matrix
                 pose_matrix = np.eye(4)  # Initialize 4x4 identity matrix
                 pose_matrix[:3, :3] = (
-                    rotation_matrix  # Top-left 3x3 is the rotation matrix
+                    rotation_matrix_world  # Top-left 3x3 is the rotation matrix
                 )
-                pose_matrix[:3, 3] = position  # Top-right 3x1 is the translation vector
+                pose_matrix[:3, 3] = position_world  # Top-right 3x1 is the translation vector
                 self.pose_matrix = pose_matrix  # update
 
                 # Publish the updated odometry message
                 self.odometry_pub.publish(odom_msg)
+
+                # Create and broadcast transform
+                transform = TransformStamped()
+                transform.header.stamp = odom_msg.header.stamp
+                transform.header.frame_id = "odom_frame"
+                transform.child_frame_id = "base_link"
+
+                transform.transform.translation.x = position_world[0]
+                transform.transform.translation.y = position_world[1]
+                transform.transform.translation.z = position_world[2]
+
+                transform.transform.rotation.x = quaternion_world[0]
+                transform.transform.rotation.y = quaternion_world[1]
+                transform.transform.rotation.z = quaternion_world[2]
+                transform.transform.rotation.w = quaternion_world[3]
+
+                self.tf_broadcaster.sendTransform(transform)
 
             elif entry["type"] == "rgb":
                 # RGB Publishing
@@ -461,7 +501,7 @@ class StrayScannerDataPublisher(Node):
 
                     if points_with_rgb.size > 0:
                         # Convert points to PointCloud2 message
-                        pointcloud_msg = create_pointcloud2(points_with_rgb)
+                        pointcloud_msg = create_pointcloud2(points_with_rgb, "body")
                         pointcloud_msg.header.stamp = (
                             depth_msg.header.stamp
                         )  # Sync with depth image
@@ -480,14 +520,6 @@ class StrayScannerDataPublisher(Node):
                             self.pose_matrix @ points_xyz_local_homg.T
                         ).T
 
-                        # let world cloud parr to the z=0 ground
-                        T_cam_to_FLU = np.array(
-                            [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
-                        )
-                        points_xyz_world_homg = (
-                            T_cam_to_FLU @ points_xyz_world_homg.T
-                        ).T
-
                         # reset with the transformed cloud
                         points_with_rgb_world[:, :3] = points_xyz_world_homg[:, :3]
 
@@ -498,7 +530,7 @@ class StrayScannerDataPublisher(Node):
                         ]
 
                         pointcloud_world_msg = create_pointcloud2(
-                            points_with_rgb_world_skip_k
+                            points_with_rgb_world_skip_k, "odom_frame"
                         )
                         pointcloud_world_msg.header.stamp = (
                             depth_msg.header.stamp
