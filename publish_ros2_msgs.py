@@ -259,11 +259,17 @@ class StrayScannerDataPublisher(Node):
         imu_data = read_csv(f"{data_dir}/imu.csv")[1:]  # Skip header
         odometry_data = read_csv(f"{data_dir}/odometry.csv")[1:]  # Skip header
 
+        # Prepare Depth data with Confidence
+        self.depth_dir = os.path.join(data_dir, "depth")
+        depth_data = self.prepare_image_paths(self.depth_dir, odometry_data)
+        self.num_frames = len(depth_data)
+
         # Convert the video to images 
         video_path = f"{data_dir}/rgb.mp4"
+        print(f"video_path: {video_path}")
         self.rgb_dir = os.path.join(data_dir, "images")
         # Check if rgb_dir exists
-        if os.path.exists(self.rgb_dir):
+        if os.path.exists(self.rgb_dir) and len(os.listdir(self.rgb_dir)) == self.num_frames:
             print(f"{self.rgb_dir} already exists. Skipping save_frames.")
         else:
             os.makedirs(self.rgb_dir, exist_ok=True) 
@@ -271,11 +277,6 @@ class StrayScannerDataPublisher(Node):
 
         # Prepare RGB data
         rgb_data = self.prepare_image_paths(self.rgb_dir, odometry_data)
-        self.num_frames = len(rgb_data)
-
-        # Prepare Depth data with Confidence
-        self.depth_dir = os.path.join(data_dir, "depth")
-        depth_data = self.prepare_image_paths(self.depth_dir, odometry_data)
 
         # Prepare intrinsic matrix
         camera_matrix_csv = f"{data_dir}/camera_matrix.csv"
