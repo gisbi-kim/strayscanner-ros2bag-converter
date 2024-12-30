@@ -5,6 +5,7 @@ import cv2
 import rclpy
 from rclpy.node import Node
 import csv
+from scipy.spatial.transform import Rotation
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Imu, Image, PointCloud2, PointField
 from nav_msgs.msg import Odometry
@@ -152,6 +153,14 @@ def read_csv(file_path):
         data = [row for row in reader]
     return data
 
+def skew_symmetric(v):
+    """
+    Creates a skew-symmetric matrix from a vector.
+    """
+    return np.array([[0, -v[2], v[1]],
+                     [v[2], 0, -v[0]],
+                     [-v[1], v[0], 0]])
+
 def rotate_to_earth(points_with_rgb):
     """
     Preprocess the point cloud by downsampling and transforming coordinates.
@@ -277,7 +286,8 @@ class StrayScannerDataPublisher(Node):
             raise FileNotFoundError(f"Camera matrix file not found: {camera_matrix_csv}")
 
         # pub option
-        self.do_rotate_points = True
+        self.latest_linear_acceleration = np.array([0.0, -9.8, 0.0])
+
         self.skip_frame_k = 1
 
         # Combine and sort all data
@@ -369,7 +379,7 @@ class StrayScannerDataPublisher(Node):
                 # IMU Publishing
                 imu_row = entry["data"]
                 imu_msg = Imu()
-                imu_msg.header.stamp = self.get_clock().now().to_msg()
+                imu_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                 imu_msg.header.frame_id = "imu_frame"
                 imu_msg.linear_acceleration.x = float(imu_row[1])
                 imu_msg.linear_acceleration.y = float(imu_row[2])
@@ -383,7 +393,7 @@ class StrayScannerDataPublisher(Node):
                 # Odometry Publishing
                 odom_row = entry["data"]
                 odom_msg = Odometry()
-                odom_msg.header.stamp = self.get_clock().now().to_msg()
+                odom_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                 odom_msg.header.frame_id = "odom_frame"
                 odom_msg.child_frame_id = "base_link"
                 odom_msg.pose.pose.position.x = float(odom_row[2])
@@ -395,6 +405,8 @@ class StrayScannerDataPublisher(Node):
                     z=float(odom_row[7]),
                     w=float(odom_row[8]),
                 )
+
+                # Publish the updated odometry message
                 self.odometry_pub.publish(odom_msg)
 
             elif entry["type"] == "rgb":
@@ -403,7 +415,7 @@ class StrayScannerDataPublisher(Node):
                 bgr_img = cv2.imread(image_info["path"])
                 if bgr_img is not None:
                     img_msg = self.bridge.cv2_to_imgmsg(bgr_img, encoding="bgr8")
-                    img_msg.header.stamp = self.get_clock().now().to_msg()
+                    img_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                     img_msg.header.frame_id = "camera_rgb_frame"
                     self.rgb_pub.publish(img_msg)
 
@@ -421,7 +433,7 @@ class StrayScannerDataPublisher(Node):
 
                     # Publish depth image
                     depth_msg = self.bridge.cv2_to_imgmsg(depth_img, encoding="mono16")
-                    depth_msg.header.stamp = self.get_clock().now().to_msg()
+                    depth_msg.header.stamp = rclpy.time.Time(seconds=timestamp).to_msg()
                     depth_msg.header.frame_id = "camera_depth_frame"
                     self.depth_pub.publish(depth_msg)
 
@@ -432,9 +444,6 @@ class StrayScannerDataPublisher(Node):
                     points_with_rgb = unproject_depth(
                         depth_img, resized_rgb, adjusted_camera_matrix, mask=mask
                     )
-
-                    if self.do_rotate_points:
-                        points_with_rgb = rotate_to_earth(points_with_rgb)
 
                     if points_with_rgb.size > 0:
                         # Convert points to PointCloud2 message
