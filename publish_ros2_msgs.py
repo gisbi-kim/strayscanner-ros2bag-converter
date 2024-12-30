@@ -153,48 +153,13 @@ def read_csv(file_path):
         data = [row for row in reader]
     return data
 
+
 def skew_symmetric(v):
     """
     Creates a skew-symmetric matrix from a vector.
     """
-    return np.array([[0, -v[2], v[1]],
-                     [v[2], 0, -v[0]],
-                     [-v[1], v[0], 0]])
+    return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
 
-def rotate_to_earth(points_with_rgb):
-    """
-    Preprocess the point cloud by downsampling and transforming coordinates.
-
-    Args:
-        points_with_rgb (np.ndarray): Input point cloud with RGB, shape (N, 6).
-        voxel_size (float): The size of the voxel grid for downsampling in meters.
-
-    Returns:
-        np.ndarray: Preprocessed point cloud with RGB, shape (M, 6).
-    """
-    if points_with_rgb.size == 0:
-        return points_with_rgb
-
-    # Separate XYZ and RGB
-    points_xyz = points_with_rgb[:, :3]
-    points_rgb = points_with_rgb[:, 3:]
-
-    # Coordinate Transformation
-    # Define rotation matrix to convert from camera to base coordinates
-    # Camera (x_right, y_down, z_forward) -> Base (x_forward, y_left, z_up)
-    R = np.array([
-        [0,  0, -1],
-        [1, 0, 0],
-        [0, -1, 0]
-    ])
-
-    # Apply rotation
-    transformed_xyz = points_xyz @ R
-
-    # Combine transformed XYZ with RGB
-    preprocessed_points = np.hstack((transformed_xyz, points_rgb))
-
-    return preprocessed_points
 
 def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
     """
@@ -215,7 +180,9 @@ def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
     # Combine IMU data with skipping
     for i, row in enumerate(imu_data[1:]):  # Skip header
         if i % k == 0:
-            combined_data.append({"timestamp": float(row[0]), "type": "imu", "data": row})
+            combined_data.append(
+                {"timestamp": float(row[0]), "type": "imu", "data": row}
+            )
 
     # Combine Odometry data with skipping
     for i, row in enumerate(odometry_data[1:]):  # Skip header
@@ -228,14 +195,22 @@ def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
     for i, image_info in enumerate(rgb_data):
         if i % k == 0:
             combined_data.append(
-                {"timestamp": image_info["timestamp"], "type": "rgb", "data": image_info}
+                {
+                    "timestamp": image_info["timestamp"],
+                    "type": "rgb",
+                    "data": image_info,
+                }
             )
 
     # Combine Depth data with skipping
     for i, image_info in enumerate(depth_data):
         if i % k == 0:
             combined_data.append(
-                {"timestamp": image_info["timestamp"], "type": "depth", "data": image_info}
+                {
+                    "timestamp": image_info["timestamp"],
+                    "type": "depth",
+                    "data": image_info,
+                }
             )
 
     # Sort by timestamp
@@ -244,16 +219,22 @@ def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
 
 
 class StrayScannerDataPublisher(Node):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, playback_speed=1.0):
         super().__init__("csv_and_video_publisher")
+
+        self.playback_speed = playback_speed  # 배속 계수 저장
 
         # Publishers
         self.imu_pub = self.create_publisher(Imu, "/imu", 100)
         self.odometry_pub = self.create_publisher(Odometry, "/odometry", 100)
         self.rgb_pub = self.create_publisher(Image, "/camera/rgb", 100)
         self.depth_pub = self.create_publisher(Image, "/camera/depth", 100)
-        self.pointcloud_pub_body = self.create_publisher(PointCloud2, "/pointcloud_body", 100)
-        self.pointcloud_pub_world = self.create_publisher(PointCloud2, "/pointcloud_world", 100)
+        self.pointcloud_pub_body = self.create_publisher(
+            PointCloud2, "/pointcloud_body", 100
+        )
+        self.pointcloud_pub_world = self.create_publisher(
+            PointCloud2, "/pointcloud_world", 100
+        )
 
         # Load CSV data
         imu_data = read_csv(f"{data_dir}/imu.csv")[1:]  # Skip header
@@ -264,15 +245,17 @@ class StrayScannerDataPublisher(Node):
         depth_data = self.prepare_image_paths(self.depth_dir, odometry_data)
         self.num_frames = len(depth_data)
 
-        # Convert the video to images 
+        # Convert the video to images
         video_path = f"{data_dir}/rgb.mp4"
         print(f"video_path: {video_path}")
         self.rgb_dir = os.path.join(data_dir, "images")
         # Check if rgb_dir exists
-        if os.path.exists(self.rgb_dir) and len(os.listdir(self.rgb_dir)) == self.num_frames:
+        if os.path.exists(self.rgb_dir) and len(os.listdir(self.rgb_dir)) > (
+            self.num_frames - 3
+        ):
             print(f"{self.rgb_dir} already exists. Skipping save_frames.")
         else:
-            os.makedirs(self.rgb_dir, exist_ok=True) 
+            os.makedirs(self.rgb_dir, exist_ok=True)
             self.save_frames(video_path)
 
         # Prepare RGB data
@@ -284,13 +267,17 @@ class StrayScannerDataPublisher(Node):
             camera_matrix_data = read_csv(camera_matrix_csv)
             self.rgb_intrinsic_matrix = np.array(camera_matrix_data, dtype=float)
         else:
-            self.get_logger().error(f"Camera matrix file not found: {camera_matrix_csv}")
-            raise FileNotFoundError(f"Camera matrix file not found: {camera_matrix_csv}")
+            self.get_logger().error(
+                f"Camera matrix file not found: {camera_matrix_csv}"
+            )
+            raise FileNotFoundError(
+                f"Camera matrix file not found: {camera_matrix_csv}"
+            )
 
         # pub option
         self.skip_frame_k = 1
 
-        self.pose_matrix = None 
+        self.pose_matrix = None
 
         # Combine and sort all data
         self.sorted_data = combine_and_sort_data(
@@ -322,7 +309,7 @@ class StrayScannerDataPublisher(Node):
 
             rgb_data.append(image_path)
             frame_idx += 1
-        
+
         cap.release()
         self.num_frames = len(rgb_data)
         print(f"num_frames: {self.num_frames}")
@@ -334,29 +321,26 @@ class StrayScannerDataPublisher(Node):
             frame_id = int(row[1])
             timestamp = float(row[0])
             if "depth" in image_dir:
-                image_path = os.path.join(
-                    image_dir, f"{frame_id:06d}.png"
-                )
+                image_path = os.path.join(image_dir, f"{frame_id:06d}.png")
                 confidence_dir = image_dir.replace("depth", "confidence")
                 confidence_path = os.path.join(confidence_dir, f"{frame_id:06d}.png")
                 if os.path.exists(image_path) and os.path.exists(confidence_path):
-                    image_data.append({
-                        "timestamp": timestamp,
-                        "depth_path": image_path,
-                        "confidence_path": confidence_path
-                    })
+                    image_data.append(
+                        {
+                            "timestamp": timestamp,
+                            "depth_path": image_path,
+                            "confidence_path": confidence_path,
+                        }
+                    )
             elif "confidence" in image_dir:
                 # Confidence images are handled alongside depth images
                 pass
             else:
                 # For RGB images
-                image_path = os.path.join(
-                    image_dir, f"{frame_id:06d}.jpg"
-                )
+                image_path = os.path.join(image_dir, f"{frame_id:06d}.jpg")
                 if os.path.exists(image_path):
                     image_data.append({"timestamp": timestamp, "path": image_path})
         return image_data
-
 
     def publish_data(self):
         if self.current_index >= len(self.sorted_data):
@@ -366,7 +350,7 @@ class StrayScannerDataPublisher(Node):
             return
 
         current_time = time.time()
-        elapsed_time = current_time - self.start_time
+        elapsed_time = (current_time - self.start_time) * self.playback_speed  # 배속 반영
 
         while (
             self.current_index < len(self.sorted_data)
@@ -409,17 +393,26 @@ class StrayScannerDataPublisher(Node):
                 )
 
                 # Extract position and orientation from odom_row
-                position = np.array([float(odom_row[2]), float(odom_row[3]), float(odom_row[4])])
-                orientation = [float(odom_row[5]), float(odom_row[6]), float(odom_row[7]), float(odom_row[8])]
+                position = np.array(
+                    [float(odom_row[2]), float(odom_row[3]), float(odom_row[4])]
+                )
+                orientation = [
+                    float(odom_row[5]),
+                    float(odom_row[6]),
+                    float(odom_row[7]),
+                    float(odom_row[8]),
+                ]
 
                 # Convert quaternion to rotation matrix using scipy
                 rotation_matrix = Rotation.from_quat(orientation).as_matrix()
 
                 # Construct SE(3) transformation matrix
                 pose_matrix = np.eye(4)  # Initialize 4x4 identity matrix
-                pose_matrix[:3, :3] = rotation_matrix  # Top-left 3x3 is the rotation matrix
+                pose_matrix[:3, :3] = (
+                    rotation_matrix  # Top-left 3x3 is the rotation matrix
+                )
                 pose_matrix[:3, 3] = position  # Top-right 3x1 is the translation vector
-                self.pose_matrix = pose_matrix # update 
+                self.pose_matrix = pose_matrix  # update
 
                 # Publish the updated odometry message
                 self.odometry_pub.publish(odom_msg)
@@ -440,9 +433,15 @@ class StrayScannerDataPublisher(Node):
                 # Depth and Confidence Handling
                 image_info = entry["data"]
                 depth_img = cv2.imread(image_info["depth_path"], cv2.IMREAD_UNCHANGED)
-                confidence_img = cv2.imread(image_info["confidence_path"], cv2.IMREAD_UNCHANGED) # 0, 1, 2
+                confidence_img = cv2.imread(
+                    image_info["confidence_path"], cv2.IMREAD_UNCHANGED
+                )  # 0, 1, 2
 
-                if depth_img is not None and depth_img.dtype == np.uint16 and confidence_img is not None:
+                if (
+                    depth_img is not None
+                    and depth_img.dtype == np.uint16
+                    and confidence_img is not None
+                ):
                     # Create mask to filter out noisy points (== 0)
                     mask = (confidence_img == 1) | (confidence_img == 2)
 
@@ -463,34 +462,47 @@ class StrayScannerDataPublisher(Node):
                     if points_with_rgb.size > 0:
                         # Convert points to PointCloud2 message
                         pointcloud_msg = create_pointcloud2(points_with_rgb)
-                        pointcloud_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
+                        pointcloud_msg.header.stamp = (
+                            depth_msg.header.stamp
+                        )  # Sync with depth image
                         self.pointcloud_pub_body.publish(pointcloud_msg)
 
-                        # using the frame pose, pub within world 
+                        # using the frame pose, pub within world
                         # Convert points to PointCloud2 message
                         points_with_rgb_world = points_with_rgb.copy()
 
-                        # body to world 
-                        points_xyz = points_with_rgb_world[:, :3] 
-                        points_xyz_local_homg = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
-                        points_xyz_world_homg = (self.pose_matrix @ points_xyz_local_homg.T).T
+                        # body to world
+                        points_xyz = points_with_rgb_world[:, :3]
+                        points_xyz_local_homg = np.hstack(
+                            (points_xyz, np.ones((points_xyz.shape[0], 1)))
+                        )
+                        points_xyz_world_homg = (
+                            self.pose_matrix @ points_xyz_local_homg.T
+                        ).T
 
-                        # let world cloud parr to the z=0 ground 
-                        T_cam_to_FLU = np.array([[0, 0, -1, 0], 
-                                                [1, 0, 0, 0], 
-                                                [0, -1, 0, 0], 
-                                                [0, 0, 0, 1]])
-                        points_xyz_world_homg = (T_cam_to_FLU @ points_xyz_world_homg.T).T
+                        # let world cloud parr to the z=0 ground
+                        T_cam_to_FLU = np.array(
+                            [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
+                        )
+                        points_xyz_world_homg = (
+                            T_cam_to_FLU @ points_xyz_world_homg.T
+                        ).T
 
-                        # reset with the transformed cloud 
-                        points_with_rgb_world[:, :3]  = points_xyz_world_homg[:, :3]
+                        # reset with the transformed cloud
+                        points_with_rgb_world[:, :3] = points_xyz_world_homg[:, :3]
 
-                        # for the lightweight visualization 
+                        # for the lightweight visualization
                         world_cloud_skip_k = 100
-                        points_with_rgb_world_skip_k = points_with_rgb_world[::world_cloud_skip_k]
+                        points_with_rgb_world_skip_k = points_with_rgb_world[
+                            ::world_cloud_skip_k
+                        ]
 
-                        pointcloud_world_msg = create_pointcloud2(points_with_rgb_world_skip_k)
-                        pointcloud_world_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
+                        pointcloud_world_msg = create_pointcloud2(
+                            points_with_rgb_world_skip_k
+                        )
+                        pointcloud_world_msg.header.stamp = (
+                            depth_msg.header.stamp
+                        )  # Sync with depth image
                         self.pointcloud_pub_world.publish(pointcloud_world_msg)
 
                     else:
@@ -511,13 +523,17 @@ class StrayScannerDataPublisher(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    if len(sys.argv) < 2:
-        print("Usage: python3 publish_ros2_msgs.py <data_directory>")
+    if len(sys.argv) < 3:
+        print("Usage: python3 publish_ros2_msgs.py <data_directory> <playback_speed>")
         rclpy.shutdown()
         return
 
     data_dir = sys.argv[1]
-    node = StrayScannerDataPublisher(data_dir)
+    playback_speed = float(sys.argv[2])
+    print(f"playback_speed is {playback_speed}")
+
+    node = StrayScannerDataPublisher(data_dir, playback_speed)
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
