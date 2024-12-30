@@ -6,14 +6,13 @@ import rclpy
 from rclpy.node import Node
 import csv
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Imu, Image
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import Imu, Image, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion
 import numpy as np
 import time
 from std_msgs.msg import Header
-from tqdm import tqdm 
+from tqdm import tqdm
 
 
 def adjust_rgb_and_camera_matrix(rgb_image, depth_image, camera_matrix):
@@ -98,14 +97,16 @@ def create_pointcloud2(points_with_rgb):
     return pointcloud_msg
 
 
-def unproject_depth(depth_image, rgb_image, camera_matrix):
+def unproject_depth(depth_image, rgb_image, camera_matrix, mask=None):
     """
     Generate a 3D point cloud with color from a depth image and camera matrix.
+    Only include points where mask is True.
 
     Args:
         depth_image (numpy.ndarray): Depth image in mm (uint16).
         rgb_image (numpy.ndarray): RGB image matching the depth image size.
         camera_matrix (numpy.ndarray): Camera intrinsic matrix.
+        mask (numpy.ndarray, optional): Boolean mask to filter points.
 
     Returns:
         point_cloud (numpy.ndarray): Nx6 array of 3D points with RGB colors (x, y, z, r, g, b).
@@ -123,6 +124,11 @@ def unproject_depth(depth_image, rgb_image, camera_matrix):
     # Flatten depth image and filter valid depths
     z = depth_image.flatten().astype(np.float32) / 1000.0  # Convert mm to meters
     valid = z > 0  # Ignore invalid depth values
+
+    if mask is not None:
+        mask = mask.flatten().astype(bool)
+        valid = valid & mask
+
     z = z[valid]
     u = u[valid]
     v = v[valid]
@@ -149,30 +155,47 @@ def read_csv(file_path):
     return data
 
 
-def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data):
+def combine_and_sort_data(imu_data, odometry_data, rgb_data, depth_data, k=1):
+    """
+    Combine and sort sensor data, skipping k-1 entries for each type.
+
+    Args:
+        imu_data (list): IMU data from CSV.
+        odometry_data (list): Odometry data from CSV.
+        rgb_data (list): RGB image data.
+        depth_data (list): Depth image data.
+        k (int): Step size for skipping data. Default is 1 (no skipping).
+
+    Returns:
+        list: Combined and sorted data.
+    """
     combined_data = []
 
-    # Combine IMU data
-    for row in imu_data[1:]:  # Skip header
-        combined_data.append({"timestamp": float(row[0]), "type": "imu", "data": row})
+    # Combine IMU data with skipping
+    for i, row in enumerate(imu_data[1:]):  # Skip header
+        if i % k == 0:
+            combined_data.append({"timestamp": float(row[0]), "type": "imu", "data": row})
 
-    # Combine Odometry data
-    for row in odometry_data[1:]:  # Skip header
-        combined_data.append(
-            {"timestamp": float(row[0]), "type": "odometry", "data": row}
-        )
+    # Combine Odometry data with skipping
+    for i, row in enumerate(odometry_data[1:]):  # Skip header
+        if i % k == 0:
+            combined_data.append(
+                {"timestamp": float(row[0]), "type": "odometry", "data": row}
+            )
 
-    # Combine RGB data
-    for image_info in rgb_data:
-        combined_data.append(
-            {"timestamp": image_info["timestamp"], "type": "rgb", "data": image_info}
-        )
+    # Combine RGB data with skipping
+    for i, image_info in enumerate(rgb_data):
+        if i % k == 0:
+            combined_data.append(
+                {"timestamp": image_info["timestamp"], "type": "rgb", "data": image_info}
+            )
 
-    # Combine Depth data
-    for image_info in depth_data:
-        combined_data.append(
-            {"timestamp": image_info["timestamp"], "type": "depth", "data": image_info}
-        )
+    # Combine Depth data with skipping
+    for i, image_info in enumerate(depth_data):
+        if i % k == 0:
+            combined_data.append(
+                {"timestamp": image_info["timestamp"], "type": "depth", "data": image_info}
+            )
 
     # Sort by timestamp
     combined_data.sort(key=lambda x: x["timestamp"])
@@ -194,23 +217,39 @@ class StrayScannerDataPublisher(Node):
         imu_data = read_csv(f"{data_dir}/imu.csv")[1:]  # Skip header
         odometry_data = read_csv(f"{data_dir}/odometry.csv")[1:]  # Skip header
 
-        # Prepare RGB data
+        # Convert the video to images 
+        video_path = f"{data_dir}/rgb.mp4"
         self.rgb_dir = os.path.join(data_dir, "images")
-        rgb_data = self.prepare_image_data(self.rgb_dir, odometry_data)
+        # Check if rgb_dir exists
+        if os.path.exists(self.rgb_dir):
+            print(f"{self.rgb_dir} already exists. Skipping save_frames.")
+        else:
+            os.makedirs(self.rgb_dir, exist_ok=True) 
+            self.save_frames(video_path)
+
+        # Prepare RGB data
+        rgb_data = self.prepare_image_paths(self.rgb_dir, odometry_data)
         self.num_frames = len(rgb_data)
 
-        # Prepare Depth data
+        # Prepare Depth data with Confidence
         self.depth_dir = os.path.join(data_dir, "depth")
-        depth_data = self.prepare_image_data(self.depth_dir, odometry_data)
+        depth_data = self.prepare_image_paths(self.depth_dir, odometry_data)
 
         # Prepare intrinsic matrix
-        self.rgb_intrinsic_matrix = np.array(
-            read_csv(f"{data_dir}/camera_matrix.csv"), dtype=float
-        )
+        camera_matrix_csv = f"{data_dir}/camera_matrix.csv"
+        if os.path.exists(camera_matrix_csv):
+            camera_matrix_data = read_csv(camera_matrix_csv)
+            self.rgb_intrinsic_matrix = np.array(camera_matrix_data, dtype=float)
+        else:
+            self.get_logger().error(f"Camera matrix file not found: {camera_matrix_csv}")
+            raise FileNotFoundError(f"Camera matrix file not found: {camera_matrix_csv}")
+
+        # pub option
+        self.skip_frame_k = 1
 
         # Combine and sort all data
         self.sorted_data = combine_and_sort_data(
-            imu_data, odometry_data, rgb_data, depth_data
+            imu_data, odometry_data, rgb_data, depth_data, self.skip_frame_k
         )
         self.current_index = 0
         self.bridge = CvBridge()
@@ -223,25 +262,57 @@ class StrayScannerDataPublisher(Node):
         self.initial_timestamp = self.sorted_data[0]["timestamp"]
         self.timer = self.create_timer(0.001, self.publish_data)  # High frequency timer
 
-    def prepare_image_data(self, image_dir, odometry_data):
+    def save_frames(self, video_path):
+        cap = cv2.VideoCapture(video_path)
+        frame_idx = 0
+        rgb_data = []
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            image_path = os.path.join(self.rgb_dir, f"{frame_idx:06d}.jpg")
+            cv2.imwrite(image_path, frame)
+
+            rgb_data.append(image_path)
+            frame_idx += 1
+        
+        cap.release()
+        self.num_frames = len(rgb_data)
+        print(f"num_frames: {self.num_frames}")
+        return rgb_data
+
+    def prepare_image_paths(self, image_dir, odometry_data):
         image_data = []
         for row in odometry_data:
             frame_id = int(row[1])
             timestamp = float(row[0])
-            image_path = os.path.join(
-                image_dir,
-                (
-                    f"{frame_id:06d}.png"
-                    if "depth" in image_dir
-                    else f"{frame_id:06d}.jpg"
-                ),
-            )
-            if os.path.exists(image_path):
-                image_data.append({"timestamp": timestamp, "path": image_path})
+            if "depth" in image_dir:
+                image_path = os.path.join(
+                    image_dir, f"{frame_id:06d}.png"
+                )
+                confidence_dir = image_dir.replace("depth", "confidence")
+                confidence_path = os.path.join(confidence_dir, f"{frame_id:06d}.png")
+                if os.path.exists(image_path) and os.path.exists(confidence_path):
+                    image_data.append({
+                        "timestamp": timestamp,
+                        "depth_path": image_path,
+                        "confidence_path": confidence_path
+                    })
+            elif "confidence" in image_dir:
+                # Confidence images are handled alongside depth images
+                pass
+            else:
+                # For RGB images
+                image_path = os.path.join(
+                    image_dir, f"{frame_id:06d}.jpg"
+                )
+                if os.path.exists(image_path):
+                    image_data.append({"timestamp": timestamp, "path": image_path})
         return image_data
 
     def publish_data(self):
-
         if self.current_index >= len(self.sorted_data):
             self.progress_bar.close()  # Close progress bar
             self.get_logger().info("All data published.")
@@ -261,10 +332,10 @@ class StrayScannerDataPublisher(Node):
             timestamp = entry["timestamp"]
 
             if entry["type"] == "imu":
+                # IMU Publishing
                 imu_row = entry["data"]
                 imu_msg = Imu()
-                imu_msg.header.stamp.sec = int(timestamp)
-                imu_msg.header.stamp.nanosec = int((timestamp - int(timestamp)) * 1e9)
+                imu_msg.header.stamp = self.get_clock().now().to_msg()
                 imu_msg.header.frame_id = "imu_frame"
                 imu_msg.linear_acceleration.x = float(imu_row[1])
                 imu_msg.linear_acceleration.y = float(imu_row[2])
@@ -275,10 +346,10 @@ class StrayScannerDataPublisher(Node):
                 self.imu_pub.publish(imu_msg)
 
             elif entry["type"] == "odometry":
+                # Odometry Publishing
                 odom_row = entry["data"]
                 odom_msg = Odometry()
-                odom_msg.header.stamp.sec = int(timestamp)
-                odom_msg.header.stamp.nanosec = int((timestamp - int(timestamp)) * 1e9)
+                odom_msg.header.stamp = self.get_clock().now().to_msg()
                 odom_msg.header.frame_id = "odom_frame"
                 odom_msg.child_frame_id = "base_link"
                 odom_msg.pose.pose.position.x = float(odom_row[2])
@@ -293,45 +364,54 @@ class StrayScannerDataPublisher(Node):
                 self.odometry_pub.publish(odom_msg)
 
             elif entry["type"] == "rgb":
+                # RGB Publishing
                 image_info = entry["data"]
                 bgr_img = cv2.imread(image_info["path"])
-                rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-                if rgb_img is not None:
+                if bgr_img is not None:
                     img_msg = self.bridge.cv2_to_imgmsg(bgr_img, encoding="bgr8")
-                    img_msg.header.stamp.sec = int(timestamp)
-                    img_msg.header.stamp.nanosec = int(
-                        (timestamp - int(timestamp)) * 1e9
-                    )
+                    img_msg.header.stamp = self.get_clock().now().to_msg()
                     img_msg.header.frame_id = "camera_rgb_frame"
                     self.rgb_pub.publish(img_msg)
 
+                rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
             elif entry["type"] == "depth":
+                # Depth and Confidence Handling
                 image_info = entry["data"]
-                depth_img = cv2.imread(image_info["path"], cv2.IMREAD_UNCHANGED)
-                if depth_img is not None and depth_img.dtype == np.uint16:
-                    # pub depth image
+                depth_img = cv2.imread(image_info["depth_path"], cv2.IMREAD_UNCHANGED)
+                confidence_img = cv2.imread(image_info["confidence_path"], cv2.IMREAD_UNCHANGED) # 0, 1, 2
+
+                if depth_img is not None and depth_img.dtype == np.uint16 and confidence_img is not None:
+                    # Create mask where confidence == 2
+                    mask = (confidence_img == 1) | (confidence_img == 2)
+
+                    # Publish depth image
                     depth_msg = self.bridge.cv2_to_imgmsg(depth_img, encoding="mono16")
-                    depth_msg.header.stamp.sec = int(timestamp)
-                    depth_msg.header.stamp.nanosec = int(
-                        (timestamp - int(timestamp)) * 1e9
-                    )
+                    depth_msg.header.stamp = self.get_clock().now().to_msg()
                     depth_msg.header.frame_id = "camera_depth_frame"
                     self.depth_pub.publish(depth_msg)
 
-                    # Generate 3D point cloud
+                    # Adjust RGB image and camera matrix
                     resized_rgb, adjusted_camera_matrix = adjust_rgb_and_camera_matrix(
                         rgb_img, depth_img, self.rgb_intrinsic_matrix
                     )
                     points = unproject_depth(
-                        depth_img, resized_rgb, adjusted_camera_matrix
+                        depth_img, resized_rgb, adjusted_camera_matrix, mask=mask
                     )
 
-                    # Convert points to PointCloud2 message
-                    pointcloud_msg = create_pointcloud2(points)
-                    pointcloud_msg.header.stamp = (
-                        depth_msg.header.stamp
-                    )  # Sync with depth image
-                    self.pointcloud_pub.publish(pointcloud_msg)
+                    if points.size > 0:
+                        # Convert points to PointCloud2 message
+                        pointcloud_msg = create_pointcloud2(points)
+                        pointcloud_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
+                        self.pointcloud_pub.publish(pointcloud_msg)
+                    else:
+                        self.get_logger().info(
+                            f"No valid points with confidence=0 in frame {self.current_index}."
+                        )
+                else:
+                    self.get_logger().warn(
+                        f"Depth or confidence image missing or invalid for frame {self.current_index}."
+                    )
 
             # Update progress bar
             self.progress_bar.update(1)
@@ -349,10 +429,13 @@ def main(args=None):
 
     data_dir = sys.argv[1]
     node = StrayScannerDataPublisher(data_dir)
-    rclpy.spin(node)
-
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

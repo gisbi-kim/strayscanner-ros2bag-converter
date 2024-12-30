@@ -1,5 +1,6 @@
 # Set working directory
 WORKDIR="$(pwd)/../../"
+DATADIR="/home/gskim/Documents/data/iphone/stray"
 
 # Set Docker image
 IMAGE="ros:rolling-ros-core"
@@ -15,6 +16,7 @@ docker run --rm -it \
     -v /tmp/.X11-unix:/tmp/.X11-unix \
     -e DISPLAY=$DISPLAY \
     -v "$WORKDIR":/ws \
+    -v "$DATADIR":/data \
     -w /ws \
     -p 8888:8888 \
     ros:rolling-ros-core \
