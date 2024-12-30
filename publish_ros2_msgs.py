@@ -252,7 +252,8 @@ class StrayScannerDataPublisher(Node):
         self.odometry_pub = self.create_publisher(Odometry, "/odometry", 100)
         self.rgb_pub = self.create_publisher(Image, "/camera/rgb", 100)
         self.depth_pub = self.create_publisher(Image, "/camera/depth", 100)
-        self.pointcloud_pub = self.create_publisher(PointCloud2, "/pointcloud", 100)
+        self.pointcloud_pub_body = self.create_publisher(PointCloud2, "/pointcloud_body", 100)
+        self.pointcloud_pub_world = self.create_publisher(PointCloud2, "/pointcloud_world", 100)
 
         # Load CSV data
         imu_data = read_csv(f"{data_dir}/imu.csv")[1:]  # Skip header
@@ -286,9 +287,9 @@ class StrayScannerDataPublisher(Node):
             raise FileNotFoundError(f"Camera matrix file not found: {camera_matrix_csv}")
 
         # pub option
-        self.latest_linear_acceleration = np.array([0.0, -9.8, 0.0])
-
         self.skip_frame_k = 1
+
+        self.pose_matrix = None 
 
         # Combine and sort all data
         self.sorted_data = combine_and_sort_data(
@@ -406,6 +407,19 @@ class StrayScannerDataPublisher(Node):
                     w=float(odom_row[8]),
                 )
 
+                # Extract position and orientation from odom_row
+                position = np.array([float(odom_row[2]), float(odom_row[3]), float(odom_row[4])])
+                orientation = [float(odom_row[5]), float(odom_row[6]), float(odom_row[7]), float(odom_row[8])]
+
+                # Convert quaternion to rotation matrix using scipy
+                rotation_matrix = Rotation.from_quat(orientation).as_matrix()
+
+                # Construct SE(3) transformation matrix
+                pose_matrix = np.eye(4)  # Initialize 4x4 identity matrix
+                pose_matrix[:3, :3] = rotation_matrix  # Top-left 3x3 is the rotation matrix
+                pose_matrix[:3, 3] = position  # Top-right 3x1 is the translation vector
+                self.pose_matrix = pose_matrix # update 
+
                 # Publish the updated odometry message
                 self.odometry_pub.publish(odom_msg)
 
@@ -421,7 +435,7 @@ class StrayScannerDataPublisher(Node):
 
                 rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
 
-            elif entry["type"] == "depth":
+            elif entry["type"] == "depth" and (self.pose_matrix is not None):
                 # Depth and Confidence Handling
                 image_info = entry["data"]
                 depth_img = cv2.imread(image_info["depth_path"], cv2.IMREAD_UNCHANGED)
@@ -449,7 +463,35 @@ class StrayScannerDataPublisher(Node):
                         # Convert points to PointCloud2 message
                         pointcloud_msg = create_pointcloud2(points_with_rgb)
                         pointcloud_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
-                        self.pointcloud_pub.publish(pointcloud_msg)
+                        self.pointcloud_pub_body.publish(pointcloud_msg)
+
+                        # using the frame pose, pub within world 
+                        # Convert points to PointCloud2 message
+                        points_with_rgb_world = points_with_rgb.copy()
+
+                        # body to world 
+                        points_xyz = points_with_rgb_world[:, :3] 
+                        points_xyz_local_homg = np.hstack((points_xyz, np.ones((points_xyz.shape[0], 1))))
+                        points_xyz_world_homg = (self.pose_matrix @ points_xyz_local_homg.T).T
+
+                        # let world cloud parr to the z=0 ground 
+                        T_cam_to_FLU = np.array([[0, 0, -1, 0], 
+                                                [1, 0, 0, 0], 
+                                                [0, -1, 0, 0], 
+                                                [0, 0, 0, 1]])
+                        points_xyz_world_homg = (T_cam_to_FLU @ points_xyz_world_homg.T).T
+
+                        # reset with the transformed cloud 
+                        points_with_rgb_world[:, :3]  = points_xyz_world_homg[:, :3]
+
+                        # for the lightweight visualization 
+                        world_cloud_skip_k = 100
+                        points_with_rgb_world_skip_k = points_with_rgb_world[::world_cloud_skip_k]
+
+                        pointcloud_world_msg = create_pointcloud2(points_with_rgb_world_skip_k)
+                        pointcloud_world_msg.header.stamp = depth_msg.header.stamp  # Sync with depth image
+                        self.pointcloud_pub_world.publish(pointcloud_world_msg)
+
                     else:
                         self.get_logger().info(
                             f"No valid points with confidence=0 in frame {self.current_index}."
